@@ -47,12 +47,45 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 
 	defer fasthttp.ReleaseResponse(response)
 
-	body := response.Body()
-	ctx.SetBody(body)
-	ctx.SetStatusCode(response.StatusCode())
-	response.Header.VisitAll(func (key, value []byte) {
-		ctx.Response.Header.Set(string(key), string(value))
-	})
+    import (
+        "bytes"
+        "compress/gzip"
+        // ... (the rest of your imports)
+    )
+
+    // ... inside requestHandler
+    var body []byte
+    if string(response.Header.Peek("Content-Encoding")) == "gzip" {
+        reader, err := gzip.NewReader(bytes.NewReader(response.Body()))
+        if err != nil {
+            ctx.SetStatusCode(500)
+            ctx.SetBody([]byte("Failed to decompress gzip response"))
+            return
+        }
+        defer reader.Close()
+
+        decompressed, err := io.ReadAll(reader)
+        if err != nil {
+            ctx.SetStatusCode(500)
+            ctx.SetBody([]byte("Failed to read decompressed data"))
+            return
+        }
+        body = decompressed
+        ctx.Response.Header.Del("Content-Encoding") // Don't lie to browser
+    } else {
+        body = response.Body()
+    }
+
+    ctx.SetBody(body)
+    ctx.SetStatusCode(response.StatusCode())
+
+    response.Header.VisitAll(func (key, value []byte) {
+        // Avoid passing gzip header if we already decompressed
+        if string(key) != "Content-Encoding" {
+            ctx.Response.Header.Set(string(key), string(value))
+        }
+    })
+
 }
 
 func makeRequest(ctx *fasthttp.RequestCtx, attempt int) *fasthttp.Response {
