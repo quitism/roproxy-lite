@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"log"
-	"time"
 	"os"
-	"github.com/valyala/fasthttp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 var timeout, _ = strconv.Atoi(os.Getenv("TIMEOUT"))
@@ -17,13 +21,13 @@ var client *fasthttp.Client
 
 func main() {
 	h := requestHandler
-	
+
 	client = &fasthttp.Client{
-		ReadTimeout: time.Duration(timeout) * time.Second,
+		ReadTimeout:        time.Duration(timeout) * time.Second,
 		MaxIdleConnDuration: 60 * time.Second,
 	}
 
-	if err := fasthttp.ListenAndServe(":" + port, h); err != nil {
+	if err := fasthttp.ListenAndServe(":"+port, h); err != nil {
 		log.Fatalf("Error in ListenAndServe: %s", err)
 	}
 }
@@ -44,48 +48,38 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	}
 
 	response := makeRequest(ctx, 1)
-
 	defer fasthttp.ReleaseResponse(response)
 
-    import (
-        "bytes"
-        "compress/gzip"
-        // ... (the rest of your imports)
-    )
+	var body []byte
+	if string(response.Header.Peek("Content-Encoding")) == "gzip" {
+		reader, err := gzip.NewReader(bytes.NewReader(response.Body()))
+		if err != nil {
+			ctx.SetStatusCode(500)
+			ctx.SetBody([]byte("Failed to decompress gzip response"))
+			return
+		}
+		defer reader.Close()
 
-    // ... inside requestHandler
-    var body []byte
-    if string(response.Header.Peek("Content-Encoding")) == "gzip" {
-        reader, err := gzip.NewReader(bytes.NewReader(response.Body()))
-        if err != nil {
-            ctx.SetStatusCode(500)
-            ctx.SetBody([]byte("Failed to decompress gzip response"))
-            return
-        }
-        defer reader.Close()
+		decompressed, err := io.ReadAll(reader)
+		if err != nil {
+			ctx.SetStatusCode(500)
+			ctx.SetBody([]byte("Failed to read decompressed data"))
+			return
+		}
+		body = decompressed
+		ctx.Response.Header.Del("Content-Encoding") // prevent misleading the browser
+	} else {
+		body = response.Body()
+	}
 
-        decompressed, err := io.ReadAll(reader)
-        if err != nil {
-            ctx.SetStatusCode(500)
-            ctx.SetBody([]byte("Failed to read decompressed data"))
-            return
-        }
-        body = decompressed
-        ctx.Response.Header.Del("Content-Encoding") // Don't lie to browser
-    } else {
-        body = response.Body()
-    }
+	ctx.SetBody(body)
+	ctx.SetStatusCode(response.StatusCode())
 
-    ctx.SetBody(body)
-    ctx.SetStatusCode(response.StatusCode())
-
-    response.Header.VisitAll(func (key, value []byte) {
-        // Avoid passing gzip header if we already decompressed
-        if string(key) != "Content-Encoding" {
-            ctx.Response.Header.Set(string(key), string(value))
-        }
-    })
-
+	response.Header.VisitAll(func(key, value []byte) {
+		if string(key) != "Content-Encoding" { // skip if we decompressed
+			ctx.Response.Header.Set(string(key), string(value))
+		}
+	})
 }
 
 func makeRequest(ctx *fasthttp.RequestCtx, attempt int) *fasthttp.Response {
@@ -93,29 +87,31 @@ func makeRequest(ctx *fasthttp.RequestCtx, attempt int) *fasthttp.Response {
 		resp := fasthttp.AcquireResponse()
 		resp.SetBody([]byte("Proxy failed to connect. Please try again."))
 		resp.SetStatusCode(500)
-
 		return resp
 	}
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
+
 	req.Header.SetMethod(string(ctx.Method()))
 	url := strings.SplitN(string(ctx.Request.Header.RequestURI())[1:], "/", 2)
 	req.SetRequestURI("https://" + url[0] + ".roblox.com/" + url[1])
 	req.SetBody(ctx.Request.Body())
-	ctx.Request.Header.VisitAll(func (key, value []byte) {
+
+	ctx.Request.Header.VisitAll(func(key, value []byte) {
 		req.Header.Set(string(key), string(value))
 	})
+
 	req.Header.Set("User-Agent", "RoProxy")
 	req.Header.Del("Roblox-Id")
-	resp := fasthttp.AcquireResponse()
 
+	resp := fasthttp.AcquireResponse()
 	err := client.Do(req, resp)
 
-    if err != nil {
+	if err != nil {
 		fasthttp.ReleaseResponse(resp)
-        return makeRequest(ctx, attempt + 1)
-    } else {
+		return makeRequest(ctx, attempt+1)
+	} else {
 		return resp
 	}
 }
